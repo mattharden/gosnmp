@@ -12,7 +12,9 @@ import (
 type Asn1BER byte
 
 const (
-	Integer          Asn1BER = 0x02
+	NoSuchObject     Asn1BER = 0x00
+	NoSuchInstance           = 0x01
+	Integer                  = 0x02
 	BitString                = 0x03
 	OctetString              = 0x04
 	Null                     = 0x05
@@ -24,8 +26,6 @@ const (
 	NsapAddress              = 0x45
 	Counter64                = 0x46
 	Uinteger32               = 0x47
-	NoSuchObject             = 0x80
-	NoSuchInstance           = 0x81
 )
 
 // Different packet structure is needed during decode, to trick encoding/asn1 to decode the SNMP packet
@@ -51,7 +51,7 @@ type PDUResponse struct {
 	RequestId   int32
 	ErrorStatus int
 	ErrorIndex  int
-	VarBindList []*Variable
+	VarBindList []Variable
 }
 
 type Message struct {
@@ -60,111 +60,74 @@ type Message struct {
 	Data      asn1.RawValue
 }
 
-func decode(data []byte) (*PDUResponse, error) {
+func decode(data []byte, pdu *PDUResponse) error {
 	m := Message{}
 	_, err := asn1.Unmarshal(data, &m)
 	if err != nil {
 		return nil, err
 	}
-	choice := m.Data.FullBytes[0]
-	switch choice {
+	tag := m.Data.Tag
+	switch tag {
 	// SNMP Response
-	case 0xa0, 0xa1, 0xa2:
+	case 0x20, 0x21, 0x22:
 
-		pdu := new(PDU)
+		var pdu PDU
 
-		// hack ANY -> IMPLICIT SEQUENCE
-		m.Data.FullBytes[0] = 0x30
-		_, err = asn1.Unmarshal(m.Data.FullBytes, pdu)
+		_, err = asn1.UnmarshalWithParams(m.Data.FullBytes, &pdu, fmt.Sprint("tag:",tag))
 		if err != nil {
-			return nil, fmt.Errorf("Error decoding pdu: %#v, %#v, %s", m.Data.FullBytes, pdu, err)
+			return fmt.Errorf("Error decoding pdu: %#v, %#v, %s", m.Data.FullBytes, pdu, err)
 		}
 
 		// make response pdu
-		resp := new(PDUResponse)
+		var resp PDUResponse
 		// Copy values from parsed pdu
 		resp.RequestId = pdu.RequestId
 		resp.ErrorIndex = pdu.ErrorIndex
 		resp.ErrorStatus = pdu.ErrorStatus
 
-		resp.VarBindList = make([]*Variable, len(pdu.VarBindList))
+		resp.VarBindList = make([]Variable, len(pdu.VarBindList))
 
 		// Decode all vars
 		for c, v := range pdu.VarBindList {
 
-			val, err := decodeValue(v.Value.FullBytes)
+			err := decodeValue(v.Name, v.Value, &resp.VarBindList[c])
 			if err != nil {
-				return nil, err
-			} else {
-				val.Name = v.Name
-				resp.VarBindList[c] = val
+				return err
 			}
 		}
 
-		return resp, nil
-	default:
-		return nil, fmt.Errorf("Unable to decode type: %#v\n", choice)
+		pdu = &resp
+		return
 	}
-	return nil, fmt.Errorf("Unknown CHOICE: %x", choice)
+	return fmt.Errorf("Unable to decode type: %#v\n", tag)
 }
 
-func decodeValue(data []byte) (retVal *Variable, err error) {
-	retVal = new(Variable)
+func decodeValue(name string, data *asn1.RawValue, retVal *Variable) (err error) {
+	switch Asn1BER(data.Tag) {
 
-	switch Asn1BER(data[0]) {
-
-	// Integer
-	case Integer:
-		ret, err := parseInt(data[2:])
-		if err != nil {
-			break
-		}
-		retVal.Type = Integer
-		retVal.Value = ret
-	// Octet
-	case OctetString:
-		retVal.Type = OctetString
-		retVal.Value = string(data[2:])
-	// Counter32
-	case Counter32:
-		ret, err := parseInt(data[2:])
-		if err != nil {
-			break
-		}
-		retVal.Type = Counter32
-		retVal.Value = ret
-	case TimeTicks:
-		ret, err := parseInt(data[2:])
-		if err != nil {
-			break
-		}
-		retVal.Type = TimeTicks
-		retVal.Value = ret
-	// Gauge32
-	case Gauge32:
-		ret, err := parseInt(data[2:])
-		if err != nil {
-			break
-		}
-		retVal.Type = Gauge32
-		retVal.Value = ret
+	// simple values
+	case Integer, OctetString:
+		params, val = "", new(interface{})
+	// 32 bit application values
+	case Counter32, TimeTicks, Gauge32:
+		params, val = fmt.Sprint("tag:", data.Tag), new(int32)
+	// 64 bit application values
 	case Counter64:
-		ret, err := parseInt64(data[2:])
-
-		// Decode it
-		if err != nil {
-			break
-		}
-
-		retVal.Type = Counter64
-		retVal.Value = ret
+		params, val = fmt.Sprint("tag:", data.Tag), new(int64)
 	case NoSuchInstance:
-		return nil, fmt.Errorf("No such instance")
+		return fmt.Errorf("No such instance")
 	case NoSuchObject:
-		return nil, fmt.Errorf("No such object")
+		return fmt.Errorf("No such object")
 	default:
-		err = fmt.Errorf("Unable to decode %x - not implemented", data[0])
+		return fmt.Errorf("Unable to decode %x - not implemented", data[0])
 	}
+	_, err = asn1.UnmarshalWithParams(m.Data.FullBytes, &val, fmt.Sprint("tag:",data.Tag))
+	if err != nil {
+		return
+	}
+	*retVal.Name = name
+	*retVal.Type = Asn1BER(data.Tag)
+	*retVal.Value = val
 
 	return
 }
