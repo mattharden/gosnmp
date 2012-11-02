@@ -131,11 +131,3 @@ func decodeValue(name string, data *asn1.RawValue, retVal *Variable) (err error)
 
 	return
 }
-
-// Parses UINT16
-func ParseUint16(content []byte) int {
-	number := uint8(content[1]) | uint8(content[0])<<8
-	//fmt.Printf("\t%d\n", number)
-
-	return int(number)
-}
